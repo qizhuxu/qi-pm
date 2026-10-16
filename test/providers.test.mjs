@@ -34,36 +34,33 @@ test("endpointFor keeps a base that already names the full path", () => {
 })
 
 test("requestFor builds an Anthropic messages request", () => {
-  const request = requestFor("anthropic", CONFIG, "RULES", "the draft")
+  const request = requestFor("anthropic", CONFIG, "the message")
   assert.equal(request.url, "https://api.example.com/v1/messages")
   assert.equal(request.headers["x-api-key"], "sk-test")
   assert.equal(request.headers["anthropic-version"], "2023-06-01")
   const body = JSON.parse(request.body)
   assert.equal(body.model, "claude-sonnet-4-5")
-  assert.equal(body.system, "RULES")
   assert.equal(body.max_tokens, 2048)
-  assert.deepEqual(body.messages, [{ role: "user", content: "the draft" }])
+  assert.equal(body.system, undefined)
+  assert.deepEqual(body.messages, [{ role: "user", content: "the message" }])
 })
 
 test("requestFor builds an OpenAI chat request", () => {
-  const request = requestFor("openai-chat", CONFIG, "RULES", "the draft")
+  const request = requestFor("openai-chat", CONFIG, "the message")
   assert.equal(request.url, "https://api.example.com/v1/chat/completions")
   assert.equal(request.headers.authorization, "Bearer sk-test")
   const body = JSON.parse(request.body)
-  assert.equal(body.messages[0].role, "system")
-  assert.equal(body.messages[0].content, "RULES")
-  assert.equal(body.messages[1].role, "user")
-  assert.equal(body.messages[1].content, "the draft")
+  assert.deepEqual(body.messages, [{ role: "user", content: "the message" }])
 })
 
 test("requestFor builds an OpenAI responses request", () => {
-  const request = requestFor("openai-responses", CONFIG, "RULES", "the draft")
+  const request = requestFor("openai-responses", CONFIG, "the message")
   assert.equal(request.url, "https://api.example.com/v1/responses")
   assert.equal(request.headers.authorization, "Bearer sk-test")
   const body = JSON.parse(request.body)
   assert.equal(body.model, "claude-sonnet-4-5")
-  assert.equal(body.instructions, "RULES")
-  assert.equal(body.input, "the draft")
+  assert.equal(body.input, "the message")
+  assert.equal(body.instructions, undefined)
   assert.equal(body.max_output_tokens, 2048)
 })
 
@@ -121,12 +118,20 @@ test("authHeaders carries each protocol's credential", () => {
   assert.equal(chat["x-api-key"], undefined)
 })
 
-test("buildPrompt marks the draft and keeps context above it", () => {
-  assert.equal(buildPrompt("the draft", ""), "[Draft]" + NL + "the draft")
-  assert.equal(
-    buildPrompt("the draft", "项目目录：D:/x"),
-    "[Context]" + NL + "项目目录：D:/x" + NL + NL + "[Draft]" + NL + "the draft",
-  )
+test("buildPrompt orders header, context, template and draft", () => {
+  const bare = buildPrompt("the draft", "")
+  assert.ok(bare.startsWith("### REWRITE REQUEST ###"))
+  assert.ok(bare.includes("### BEGIN RESPONSE ###"))
+  assert.ok(bare.endsWith("[Draft]" + NL + "the draft"))
+  assert.ok(!bare.includes("[Context]"))
+
+  const withContext = buildPrompt("the draft", "项目目录：D:/x")
+  const ctxAt = withContext.indexOf("[Context]" + NL + "项目目录：D:/x")
+  const rulesAt = withContext.indexOf("### BEGIN RESPONSE ###")
+  const draftAt = withContext.indexOf("[Draft]" + NL + "the draft")
+  assert.ok(ctxAt >= 0)
+  assert.ok(rulesAt > ctxAt)
+  assert.ok(draftAt > rulesAt)
 })
 
 test("stripContext drops an echoed context block and nothing else", () => {
