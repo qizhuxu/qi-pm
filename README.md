@@ -48,7 +48,7 @@ settings hook 只能往上下文里注入旁白，用户看不见，也改不了
 开发时加载本地目录（支持热重载）：
 
 ```bash
-claude --plugin-dir D:/AI/BeAnything/cc-mod-qiqm
+claude --plugin-dir <本仓库路径>
 ```
 
 装好后 `/plugin` 的 Installed 页会显示 mod 计数。
