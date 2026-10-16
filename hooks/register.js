@@ -6,8 +6,9 @@
 //   $.model.complete()    a model call outside the main conversation
 //   $.prompt.fill()       write back into the box, without sending
 //
-// The main conversation never sees the draft's rewrite unless the person
-// presses Enter on it.
+// The main conversation never sees the rewrite unless the person presses
+// Enter on it. Two ways in: the /qi-pm command, and a Button on the band
+// above the prompt.
 
 const NL = String.fromCharCode(10)
 
@@ -113,11 +114,16 @@ async function resolveModel($) {
   return undefined
 }
 
-async function rewrite($) {
-  const box = await $.prompt.read()
-  const draft = box && typeof box.text === "string" ? box.text.trim() : ""
+// `explicitDraft` comes from /qi-pm <text>; without it the box is the source.
+async function rewrite($, explicitDraft) {
+  let draft = typeof explicitDraft === "string" ? explicitDraft.trim() : ""
+
   if (!draft) {
-    status($, "qi-pm: 输入框是空的")
+    const box = await $.prompt.read()
+    draft = box && typeof box.text === "string" ? box.text.trim() : ""
+  }
+  if (!draft) {
+    status($, "qi-pm: 输入框是空的，也没有给参数")
     return
   }
 
@@ -168,11 +174,47 @@ async function rewrite($) {
   status($, "qi-pm: 改写完成" + how + "，改完按 Enter 发送")
 }
 
+const COMMAND_NAME = "qi-pm"
+
 export function register(on, options) {
+  // Registering in session.start makes the command available from the first
+  // turn. A taken name throws, and a throw here would skip the rest of this
+  // hook, so it is wrapped.
+  on("session.start", async ($, e, next) => {
+    try {
+      await $.command.register({
+        name: COMMAND_NAME,
+        description: "改写输入框里的草稿，结果回填等你确认",
+        argumentHint: "[草稿]",
+      })
+    } catch (err) {
+      const why = err && err.message ? err.message : String(err)
+      status($, "qi-pm: 注册命令失败 — " + why)
+    }
+    return next(e)
+  })
+
+  // /qi-pm [草稿] — with no argument it rewrites what is in the box.
+  on("command.run", { command: COMMAND_NAME }, async ($, e) => {
+    await rewrite($, e.args)
+    return {}
+  }).catch(async ($, e, next) => {
+    // command.run gates the command, so it carries a catch handler:
+    // a throw here would otherwise leave the command without an answer.
+    const failure = next.error
+    const why = failure && failure.message
+      ? failure.message
+      : (failure ? failure.kind : "unknown")
+    status($, "qi-pm: 命令失败 — " + why)
+    return {}
+  })
+
+  // The band above the prompt. hotkey "p" works while the box is empty, so a
+  // bare p then Enter is the fastest path.
   on("ui.render", { component: "AbovePrompt" }, async ($, e) => {
     const { Button } = $.ui.resolve(e)
     return Button({
-      key: "qi-pm",
+      key: COMMAND_NAME,
       label: "改写",
       hotkey: "p",
       plain: true,
