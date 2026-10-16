@@ -24,7 +24,7 @@ const DRAFT_MARK = "[Draft]"
 
 // Read as a system prompt on the complete path, and as the opening of the
 // single user message on the fork path, where there is no system slot.
-const RULES = `Rewrite the draft at the end of this message into a precise prompt for a coding agent.
+const RULES = `Here is an instruction I want to send to a coding agent, but it needs to be improved. Rewrite and enhance it to make it clearer, more specific and less ambiguous, and correct any mistakes. Consider the conversation context above when enhancing. Reply immediately with your answer, even if you are not sure.
 
 Rules:
 - The draft begins after the ${DRAFT_MARK} line; everything before that line is context, for your eyes only.
