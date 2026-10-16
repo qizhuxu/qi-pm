@@ -1,0 +1,12 @@
+{
+  "name": "qi-pm",
+  "displayName": "Qi Prompt Master",
+  "version": "0.1.0",
+  "description": "Rewrite the draft in the prompt box with a side-channel model call, then put the result back for you to edit or send.",
+  "author": {
+    "name": "qizhuxu",
+    "email": "qykzhu@163.com"
+  },
+  "license": "MIT",
+  "keywords": ["prompt", "rewrite", "enhance", "mod", "composer"]
+}
