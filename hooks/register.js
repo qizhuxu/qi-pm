@@ -31,7 +31,7 @@ const HEADER = "### REWRITE REQUEST ###" + NL + "This is a machine-generated pro
 // system slot proved fragile: a proxy-backed chat model read the system
 // prompt as the thing to improve. The shape is wukong's: context first,
 // template next, the draft last.
-const RULES = `Here is an instruction I want to send to a coding agent, but it needs to be improved. Rewrite and enhance it to make it clearer, more specific and less ambiguous, and correct any mistakes. Consider the conversation context above when enhancing. Reply immediately with your answer, even if you are not sure.
+const RULES = `Here is an instruction I want to send to a coding agent, but it needs to be improved. Rewrite and enhance it to make it clearer, more specific and less ambiguous, and correct any mistakes. Use the conversation context above: when the draft refers to earlier discussion vaguely, name the concrete items found in the context instead of repeating the vague reference. Reply immediately with your answer, even if you are not sure.
 
 Reply with the following format, and nothing else:
 
