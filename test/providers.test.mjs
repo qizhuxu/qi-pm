@@ -5,7 +5,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 
-import { endpointFor, requestFor, textFrom, errorFrom, joinPath, authHeaders, buildPrompt, stripContext } from "../hooks/register.js"
+import { endpointFor, requestFor, textFrom, errorFrom, joinPath, authHeaders, buildPrompt, stripContext, templateFor, RULES } from "../hooks/register.js"
 
 const NL = String.fromCharCode(10)
 
@@ -132,6 +132,19 @@ test("buildPrompt orders header, context, template and draft", () => {
   assert.ok(ctxAt >= 0)
   assert.ok(rulesAt > ctxAt)
   assert.ok(draftAt > rulesAt)
+})
+
+test("templateFor falls back to the built-in template", () => {
+  assert.equal(templateFor({ prompt: "" }), RULES)
+  assert.equal(templateFor({ prompt: "自定义模板" }), "自定义模板")
+})
+
+test("buildPrompt uses a custom template whole", () => {
+  const message = buildPrompt("the draft", "", "MY TEMPLATE")
+  assert.ok(message.startsWith("### REWRITE REQUEST ###"))
+  assert.ok(message.includes("MY TEMPLATE"))
+  assert.ok(!message.includes("### BEGIN RESPONSE ###"))
+  assert.ok(message.endsWith("[Draft]" + NL + "the draft"))
 })
 
 test("stripContext drops an echoed context block and nothing else", () => {

@@ -75,12 +75,19 @@ const PROTOCOL_LABELS = [
 
 // One user message, wukong's shape: header, then context, then the template,
 // then the draft last — the model rewrites what it read most recently.
-function buildPrompt(draft, context) {
+function buildPrompt(draft, context, template = RULES) {
   const parts = [HEADER]
   if (context) parts.push("[Context]" + NL + context)
-  parts.push(RULES)
+  parts.push(template)
   parts.push(DRAFT_MARK + NL + draft)
   return parts.join(NL + NL)
+}
+
+// A custom template replaces the built-in one whole, wukong's setDefaultPrompt;
+// an empty field keeps the default. The header, the context block and the
+// [Draft] line are code-side and stay either way.
+function templateFor(config) {
+  return config.prompt !== "" ? config.prompt : RULES
 }
 
 // The rewriter sometimes echoes the context block back — it reads the whole
@@ -234,6 +241,7 @@ async function loadConfig($) {
     baseUrl: typeof held.baseUrl === "string" ? held.baseUrl : "",
     apiKey: typeof held.apiKey === "string" ? held.apiKey : "",
     model: typeof held.model === "string" ? held.model : "",
+    prompt: typeof held.prompt === "string" ? held.prompt : "",
   }
 }
 
@@ -248,6 +256,9 @@ async function saveConfig($, patch) {
     const current = await loadConfig($)
     await $.store.set(CONFIG_KEY, Object.assign({}, current, patch))
     $.ui.toast("qi-pm：设置已保存")
+    if (typeof patch.prompt === "string" && patch.prompt !== "" && !patch.prompt.includes(BEGIN)) {
+      $.ui.toast("模板里没有 " + BEGIN + " 标记，改写结果可能无法回填")
+    }
     $.ui.invalidate("ui.render")
   } catch (err) {
     status($, "保存设置失败 — " + why(err))
@@ -354,9 +365,9 @@ function errorFrom(json) {
 // looks exactly like the main conversation's. A relay that serves only
 // Claude Code traffic passes this one and turns away the light request
 // complete sends, which is what the HTTP 503 on the first run was.
-async function forkRewrite($, draft) {
+async function forkRewrite($, draft, template) {
   try {
-    return await $.model.fork({ prompt: buildPrompt(draft, "") })
+    return await $.model.fork({ prompt: buildPrompt(draft, "", template) })
   } catch (err) {
     return { isAnswered: false, reason: "fork 调用失败", error: why(err) }
   }
@@ -365,7 +376,7 @@ async function forkRewrite($, draft) {
 // The fallback for a session whose main thread has not answered yet: fork
 // has no prefix to replay then, so complete carries the request instead. It
 // has no transcript of its own, so it reads one and sends it along.
-async function completeRewrite($, draft) {
+async function completeRewrite($, draft, template) {
   const model = await resolveModel($)
   if (!model) return { isAnswered: false, reason: "拿不到当前模型" }
 
@@ -374,7 +385,7 @@ async function completeRewrite($, draft) {
   try {
     result = await $.model.complete({
       model,
-      prompt: buildPrompt(draft, context),
+      prompt: buildPrompt(draft, context, template),
       maxTokens: MAX_TOKENS,
     })
   } catch (err) {
@@ -389,9 +400,9 @@ async function completeRewrite($, draft) {
 
 // The custom-endpoint path: one plain HTTP call, the three protocols folded
 // into one shape by requestFor and textFrom.
-async function customRewrite($, config, draft) {
+async function customRewrite($, config, draft, template) {
   const context = await readContext($)
-  const request = requestFor(config.protocol, config, buildPrompt(draft, context))
+  const request = requestFor(config.protocol, config, buildPrompt(draft, context, template))
 
   let response
   try {
@@ -453,20 +464,21 @@ async function rewrite($, explicitDraft) {
   status($, "改写中…")
 
   const config = await loadConfig($)
+  const template = templateFor(config)
   let via
   let raw
   if (isReady(config)) {
     via = config.protocol
-    raw = await customRewrite($, config, draft)
+    raw = await customRewrite($, config, draft, template)
   } else {
     via = "fork"
-    raw = await forkRewrite($, draft)
+    raw = await forkRewrite($, draft, template)
     // Only an absent prefix falls back. Every other failure would fail the
     // same way through complete, and a relay that rejects light requests
     // rejects that path outright.
     if (!raw.isAnswered && raw.reason === "nothing-to-fork") {
       via = "complete"
-      raw = await completeRewrite($, draft)
+      raw = await completeRewrite($, draft, template)
     }
   }
 
@@ -686,6 +698,17 @@ function buttonRow(ui, $, config) {
       },
     }))
   }
+  if (config.prompt !== "") {
+    buttons.push(ui.Button({
+      key: "reset-template",
+      label: "恢复默认模板",
+      plain: true,
+      dimColor: true,
+      onPress: () => {
+        void saveConfig($, { prompt: "" })
+      },
+    }))
+  }
   return ui.Box({ flexDirection: "row", gap: 2, children: buttons })
 }
 
@@ -714,6 +737,7 @@ async function paneBody($, e) {
     settingInput(ui, $, config, "baseUrl", "端点", "https://api.example.com（可带 /v1，留空回退主模型）", false),
     settingInput(ui, $, config, "apiKey", "密钥", keyHint(config), true),
     modelRow,
+    settingInput(ui, $, config, "prompt", "模板", "留空用内置模板；自定义需含 " + BEGIN + " 标记", false),
     buttonRow(ui, $, config),
   ]
   return ui.Box({ flexDirection: "column", gap: 1, children: rows })
@@ -801,4 +825,4 @@ export function register(on, options) {
 }
 
 // Exported for the tests alone; the engine only reads register.
-export { endpointFor, requestFor, textFrom, errorFrom, joinPath, authHeaders, buildPrompt, stripContext, RULES }
+export { endpointFor, requestFor, textFrom, errorFrom, joinPath, authHeaders, buildPrompt, stripContext, templateFor, RULES }
