@@ -1,15 +1,19 @@
-// qi-pm — rewrite the draft in the prompt box with a side-channel model call,
-// then put the result back for the person to edit or send.
+// qi-pm — rewrite the draft in the prompt box with a side model call, then
+// put the result back for the person to edit or send.
 //
-// Four API calls carry the whole interaction:
+// Two ways in: the /qi-pm command and the 改写 Button on the band above the
+// prompt. /qi-pm-config, or the 设置 Button, opens a pane that points the
+// rewrite at a custom endpoint: Anthropic, OpenAI chat completions, or
+// OpenAI responses. With none set the rewrite goes through Claude Code's
+// own model instead.
+//
+// The calls that carry the interaction:
 //   $.prompt.read()       read the draft
-//   $.model.fork()        the model call, replaying the main thread's request
-//   $.model.complete()    the fallback, for a session with no history yet
+//   $.model.fork()        the main-model call, replaying the main thread's request
+//   $.model.complete()    its fallback, for a session with no history yet
+//   $.http.fetch()        the call to a custom endpoint, when one is set
 //   $.prompt.fill()       write back into the box, without sending
-//
-// The main conversation never sees the rewrite unless the person presses
-// Enter on it. Two ways in: the /qi-pm command, and a Button on the band
-// above the prompt.
+//   $.store, $.ui.open    settings that persist, and the pane that edits them
 
 const NL = String.fromCharCode(10)
 
@@ -29,6 +33,26 @@ Rules:
 - Do not invent requirements the draft does not imply.`
 
 const MAX_TOKENS = 2048
+
+const COMMAND_NAME = "qi-pm"
+const CONFIG_COMMAND = "qi-pm-config"
+const CONFIG_KEY = "config"
+const PANE_ID = "qi-pm-config"
+
+const PROTOCOLS = ["main", "anthropic", "openai-chat", "openai-responses"]
+
+const PROTOCOL_PATHS = {
+  anthropic: "/v1/messages",
+  "openai-chat": "/v1/chat/completions",
+  "openai-responses": "/v1/responses",
+}
+
+const PROTOCOL_LABELS = [
+  { value: "main", label: "主模型（Claude Code 自己的）" },
+  { value: "anthropic", label: "Anthropic · /v1/messages" },
+  { value: "openai-chat", label: "OpenAI · /v1/chat/completions" },
+  { value: "openai-responses", label: "OpenAI · /v1/responses" },
+]
 
 function buildPrompt(draft, context) {
   if (!context) return draft
@@ -160,6 +184,132 @@ function why(err) {
   return String(err)
 }
 
+// ---------------------------------------------------------------- settings
+
+async function loadConfig($) {
+  let raw
+  try {
+    raw = await $.store.get(CONFIG_KEY)
+  } catch (err) {
+    raw = undefined
+  }
+  const held = raw && typeof raw === "object" ? raw : {}
+  return {
+    protocol: PROTOCOLS.indexOf(held.protocol) >= 0 ? held.protocol : "main",
+    baseUrl: typeof held.baseUrl === "string" ? held.baseUrl : "",
+    apiKey: typeof held.apiKey === "string" ? held.apiKey : "",
+    model: typeof held.model === "string" ? held.model : "",
+  }
+}
+
+// A custom endpoint needs all three fields; anything less falls back to the
+// main model rather than failing the rewrite.
+function isReady(config) {
+  return config.protocol !== "main" && config.baseUrl !== "" && config.apiKey !== "" && config.model !== ""
+}
+
+async function saveConfig($, patch) {
+  try {
+    const current = await loadConfig($)
+    await $.store.set(CONFIG_KEY, Object.assign({}, current, patch))
+    $.ui.toast("qi-pm：设置已保存")
+    $.ui.invalidate("ui.render")
+  } catch (err) {
+    status($, "保存设置失败 — " + why(err))
+  }
+}
+
+// ------------------------------------------------------------- the requests
+
+// Join the base with the protocol's path: a base that already names the full
+// path is kept as it is, a base ending in /v1 gets the tail alone, so both
+// https://host and https://host/v1 land on the same URL.
+function endpointFor(protocol, baseUrl) {
+  let base = baseUrl.trim()
+  while (base.endsWith("/")) base = base.slice(0, -1)
+  const path = PROTOCOL_PATHS[protocol]
+  if (!path) return base
+  if (base.endsWith(path)) return base
+  const tail = path.slice(3)
+  if (base.endsWith("/v1")) return base + tail
+  return base + path
+}
+
+function requestFor(protocol, config, rules, prompt) {
+  const headers = { "content-type": "application/json" }
+  let body
+  if (protocol === "anthropic") {
+    headers["x-api-key"] = config.apiKey
+    headers["anthropic-version"] = "2023-06-01"
+    body = {
+      model: config.model,
+      max_tokens: MAX_TOKENS,
+      system: rules,
+      messages: [{ role: "user", content: prompt }],
+    }
+  } else if (protocol === "openai-responses") {
+    headers.authorization = "Bearer " + config.apiKey
+    body = {
+      model: config.model,
+      instructions: rules,
+      input: prompt,
+      max_output_tokens: MAX_TOKENS,
+    }
+  } else {
+    headers.authorization = "Bearer " + config.apiKey
+    body = {
+      model: config.model,
+      max_tokens: MAX_TOKENS,
+      messages: [
+        { role: "system", content: rules },
+        { role: "user", content: prompt },
+      ],
+    }
+  }
+  return { url: endpointFor(protocol, config.baseUrl), headers, body: JSON.stringify(body) }
+}
+
+function textFrom(protocol, json) {
+  if (!json || typeof json !== "object") return undefined
+  if (protocol === "anthropic") {
+    const parts = Array.isArray(json.content) ? json.content : []
+    const texts = []
+    for (const part of parts) {
+      if (part && part.type === "text" && typeof part.text === "string") texts.push(part.text)
+    }
+    return texts.length > 0 ? texts.join("") : undefined
+  }
+  if (protocol === "openai-chat") {
+    const choices = Array.isArray(json.choices) ? json.choices : []
+    const message = choices[0] && choices[0].message
+    return message && typeof message.content === "string" ? message.content : undefined
+  }
+  if (protocol === "openai-responses") {
+    if (typeof json.output_text === "string" && json.output_text !== "") return json.output_text
+    const output = Array.isArray(json.output) ? json.output : []
+    const texts = []
+    for (const item of output) {
+      if (!item || item.type !== "message" || !Array.isArray(item.content)) continue
+      for (const part of item.content) {
+        if (part && part.type === "output_text" && typeof part.text === "string") texts.push(part.text)
+      }
+    }
+    return texts.length > 0 ? texts.join("") : undefined
+  }
+  return undefined
+}
+
+function errorFrom(json) {
+  if (!json || typeof json !== "object") return undefined
+  const error = json.error
+  if (error && typeof error === "object" && typeof error.message === "string") return error.message
+  if (typeof error === "string" && error !== "") return error
+  if (typeof json.message === "string" && json.message !== "") return json.message
+  return undefined
+}
+
+// --------------------------------------------------------------- the calls
+
 // $.model.fork replays the main thread's last request — its model, system
 // prompt, tools and messages — with our instruction after it, so the request
 // looks exactly like the main conversation's. A relay that serves only
@@ -193,14 +343,64 @@ async function completeRewrite($, draft) {
   }
 }
 
+// The custom-endpoint path: one plain HTTP call, the three protocols folded
+// into one shape by requestFor and textFrom.
+async function customRewrite($, config, draft) {
+  const context = await readContext($)
+  const request = requestFor(config.protocol, config, RULES, buildPrompt(draft, context))
+
+  let response
+  try {
+    response = await $.http.fetch(request.url, {
+      method: "POST",
+      headers: request.headers,
+      body: request.body,
+    })
+  } catch (err) {
+    return { isAnswered: false, reason: "请求没有发出去", error: why(err) }
+  }
+
+  let json
+  try {
+    json = JSON.parse(response.text)
+  } catch (err) {
+    json = undefined
+  }
+
+  if (!response.ok) {
+    const detail = errorFrom(json) || response.text.slice(0, 200)
+    return { isAnswered: false, reason: "HTTP " + response.status, error: detail }
+  }
+  if (!json) {
+    return { isAnswered: false, reason: "响应不是 JSON", error: response.text.slice(0, 200) }
+  }
+
+  const text = textFrom(config.protocol, json)
+  if (typeof text !== "string" || text.trim() === "") {
+    return { isAnswered: false, reason: "响应里没有文本", error: errorFrom(json) }
+  }
+  return { isAnswered: true, text }
+}
+
+async function readDraft($, explicitDraft) {
+  if (typeof explicitDraft === "string" && explicitDraft.trim() !== "") return explicitDraft.trim()
+  try {
+    const box = await $.prompt.read()
+    return box && typeof box.text === "string" ? box.text.trim() : ""
+  } catch (err) {
+    return ""
+  }
+}
+
+function viaNote(via) {
+  if (via === "fork") return "（主模型，带完整会话上下文）"
+  if (via === "complete") return "（主模型，只带最近对话）"
+  return "（自定义端点）"
+}
+
 // `explicitDraft` comes from /qi-pm <text>; without it the box is the source.
 async function rewrite($, explicitDraft) {
-  let draft = typeof explicitDraft === "string" ? explicitDraft.trim() : ""
-
-  if (!draft) {
-    const box = await $.prompt.read()
-    draft = box && typeof box.text === "string" ? box.text.trim() : ""
-  }
+  const draft = await readDraft($, explicitDraft)
   if (!draft) {
     status($, "输入框是空的，也没有给参数")
     return
@@ -208,15 +408,22 @@ async function rewrite($, explicitDraft) {
 
   status($, "改写中…")
 
-  let via = "fork"
-  let raw = await forkRewrite($, draft)
-
-  // Only an absent prefix falls back. Every other failure would fail the
-  // same way through complete, and a relay that rejects light requests
-  // rejects that path outright.
-  if (!raw.isAnswered && raw.reason === "nothing-to-fork") {
-    via = "complete"
-    raw = await completeRewrite($, draft)
+  const config = await loadConfig($)
+  let via
+  let raw
+  if (isReady(config)) {
+    via = config.protocol
+    raw = await customRewrite($, config, draft)
+  } else {
+    via = "fork"
+    raw = await forkRewrite($, draft)
+    // Only an absent prefix falls back. Every other failure would fail the
+    // same way through complete, and a relay that rejects light requests
+    // rejects that path outright.
+    if (!raw.isAnswered && raw.reason === "nothing-to-fork") {
+      via = "complete"
+      raw = await completeRewrite($, draft)
+    }
   }
 
   const refusal = refusalOf(raw)
@@ -239,28 +446,146 @@ async function rewrite($, explicitDraft) {
     status($, "写回输入框失败 — " + why(err))
     return
   }
-
   if (filled && filled.isFilled === false) {
     status($, "输入框没有接受这次写入")
     return
   }
 
-  const how = via === "fork" ? "（带完整会话上下文）" : "（只带最近对话）"
-  status($, "改写完成" + how + "，改完按 Enter 发送")
+  status($, "改写完成" + viaNote(via) + "，改完按 Enter 发送")
 }
 
-const COMMAND_NAME = "qi-pm"
+// ------------------------------------------------------------- the settings pane
+
+function summaryLine(config) {
+  if (config.protocol === "main") return "当前走主模型（Claude Code 自己的）"
+  if (!isReady(config)) return "自定义端点还缺字段，暂时回退主模型"
+  return "当前走 " + endpointFor(config.protocol, config.baseUrl) + "，模型 " + config.model
+}
+
+function keyHint(config) {
+  return config.apiKey !== "" ? "已设置，输入新值覆盖" : "未设置"
+}
+
+async function togglePane($) {
+  try {
+    const panes = await $.ui.panes()
+    let isOpen = false
+    for (const pane of panes) {
+      if (pane.id === PANE_ID) isOpen = true
+    }
+    if (isOpen) {
+      await $.ui.close({ id: PANE_ID })
+      return
+    }
+    const opened = await $.ui.open({
+      id: PANE_ID,
+      title: "qi-pm 设置",
+      focus: true,
+      closeOnEscape: true,
+      rows: 16,
+    })
+    if (opened && opened.isPlaced === false) {
+      status($, "终端太窄，设置面板暂时显示不了 — " + opened.reason)
+    }
+  } catch (err) {
+    status($, "打开设置面板失败 — " + why(err))
+  }
+}
+
+function protocolSelect(ui, $, config) {
+  return ui.Select({
+    key: "protocol",
+    label: "协议",
+    options: PROTOCOL_LABELS,
+    value: config.protocol,
+    onSelect: (value) => {
+      void saveConfig($, { protocol: value })
+    },
+  })
+}
+
+// The key field never draws the stored key: it starts empty and a blank
+// submit is ignored, so Enter on an untouched field cannot blank the key.
+function settingInput(ui, $, config, key, label, placeholder, isSecret) {
+  return ui.Input({
+    key,
+    label,
+    placeholder,
+    value: isSecret ? "" : config[key],
+    onSubmit: (value) => {
+      const text = value.trim()
+      if (isSecret && text === "") return
+      void saveConfig($, { [key]: text })
+    },
+  })
+}
+
+function buttonRow(ui, $, config) {
+  const buttons = [
+    ui.Button({
+      key: "close",
+      label: "关闭",
+      plain: true,
+      onPress: () => {
+        void $.ui.close({ id: PANE_ID })
+      },
+    }),
+  ]
+  if (config.apiKey !== "") {
+    buttons.push(ui.Button({
+      key: "clear-key",
+      label: "清除密钥",
+      plain: true,
+      dimColor: true,
+      onPress: () => {
+        void saveConfig($, { apiKey: "" })
+      },
+    }))
+  }
+  return ui.Box({ flexDirection: "row", gap: 2, children: buttons })
+}
+
+async function paneBody($, e) {
+  const ui = $.ui.resolve(e)
+  const config = await loadConfig($)
+
+  // The mobile table draws no Input or Select yet, so it gets the summary
+  // alone rather than a tree that cannot draw.
+  if (e.surface === "mobile") {
+    return ui.Box({
+      flexDirection: "column",
+      children: [ui.Text({ children: summaryLine(config) })],
+    })
+  }
+
+  const rows = [
+    ui.Text({ bold: true, children: "qi-pm 改写设置" }),
+    ui.Text({ dimColor: true, children: summaryLine(config) }),
+    protocolSelect(ui, $, config),
+    settingInput(ui, $, config, "baseUrl", "端点", "https://api.example.com（可带 /v1，留空回退主模型）", false),
+    settingInput(ui, $, config, "apiKey", "密钥", keyHint(config), true),
+    settingInput(ui, $, config, "model", "模型", "claude-sonnet-4-5 或 gpt-4o 之类", false),
+    buttonRow(ui, $, config),
+  ]
+  return ui.Box({ flexDirection: "column", gap: 1, children: rows })
+}
+
+// ------------------------------------------------------------------ wiring
 
 export function register(on, options) {
-  // Registering in session.start makes the command available from the first
+  // Registering in session.start makes the commands available from the first
   // turn. A taken name throws, and a throw here would skip the rest of this
-  // hook, so it is wrapped.
+  // hook, so each is wrapped.
   on("session.start", async ($, e, next) => {
     try {
       await $.command.register({
         name: COMMAND_NAME,
         description: "改写输入框里的草稿，结果回填等你确认",
         argumentHint: "[草稿]",
+      })
+      await $.command.register({
+        name: CONFIG_COMMAND,
+        description: "打开 qi-pm 设置面板：自定义端点与密钥",
       })
     } catch (err) {
       status($, "注册命令失败 — " + why(err))
@@ -281,16 +606,50 @@ export function register(on, options) {
     return {}
   })
 
+  // /qi-pm-config — opens the settings pane, or closes it when it is up.
+  on("command.run", { command: CONFIG_COMMAND }, async ($, e) => {
+    await togglePane($)
+    return {}
+  }).catch(async ($, e, next) => {
+    const failure = next.error
+    const detail = failure && failure.message ? failure.message : (failure ? failure.kind : "unknown")
+    status($, "命令失败 — " + detail)
+    return {}
+  })
+
   // The band above the prompt. hotkey "p" works while the box is empty, so a
-  // bare p then Enter is the fastest path.
+  // bare p then Enter is the fastest path; "s" opens the settings pane.
   on("ui.render", { component: "AbovePrompt" }, async ($, e) => {
-    const { Button } = $.ui.resolve(e)
-    return Button({
-      key: COMMAND_NAME,
-      label: "改写",
-      hotkey: "p",
-      plain: true,
-      onPress: () => rewrite($),
+    const { Box, Button } = $.ui.resolve(e)
+    return Box({
+      flexDirection: "row",
+      gap: 1,
+      children: [
+        Button({
+          key: COMMAND_NAME,
+          label: "改写",
+          hotkey: "p",
+          plain: true,
+          onPress: () => {
+            void rewrite($)
+          },
+        }),
+        Button({
+          key: CONFIG_COMMAND,
+          label: "设置",
+          hotkey: "s",
+          plain: true,
+          onPress: () => {
+            void togglePane($)
+          },
+        }),
+      ],
     })
   })
+
+  // The settings pane's body, redrawn whenever saveConfig invalidates.
+  on("ui.render", { component: "Pane", requestId: PANE_ID }, async ($, e) => paneBody($, e))
 }
+
+// Exported for the tests alone; the engine only reads register.
+export { endpointFor, requestFor, textFrom, errorFrom }

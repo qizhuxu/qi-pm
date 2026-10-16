@@ -6,11 +6,28 @@
 
 1. 你在输入框里敲一个草稿
 2. 按提示词上方 band 里的「改写」按钮（空输入框里也可以直接按 `p`）
-3. 它读草稿，带上最近的会话上下文，调一次旁路模型改写
+3. 它读草稿，调一次旁路模型改写
 4. 改写结果**写回输入框**，不发送
 5. 你改完按 Enter 才发出去
 
 主对话看不到这次改写，除非你按了 Enter。
+
+默认走 Claude Code 自己的主模型，也可以指向你自己的端点，见下面「配置」。
+
+## 配置
+
+`/qi-pm-config`，或 band 里的「设置」按钮（空输入框里按 `s`），打开设置面板：
+
+| 项 | 说明 |
+|---|---|
+| 协议 | 主模型（默认）/ Anthropic `/v1/messages` / OpenAI `/v1/chat/completions` / OpenAI `/v1/responses` |
+| 端点 | base URL。可带 `/v1`，也可直接贴完整路径，两种都能拼对 |
+| 密钥 | 只在面板里写入，从不回显；提交空值不会覆盖已存的密钥 |
+| 模型 | 发给端点的模型名 |
+
+四项齐全才走自定义端点；缺任何一项都回退主模型，不会失败。
+
+关于密钥：存在 Claude Code 给本插件的本地存储里（`$.store`），只在调用时发给你配置的那个端点。状态行、toast、日志里都不会出现它。
 
 ## 和 settings hook 的区别
 
@@ -36,20 +53,33 @@ claude --plugin-dir D:/AI/BeAnything/cc-mod-qiqm
 
 | 调用 | 作用 |
 |---|---|
-| `$.prompt.read()` | 读输入框草稿，返回 `{text, cursor}` |
-| `$.session.model()` | 当前主模型，用作改写模型 |
-| `$.session.messages()` | 会话转录，取最近 10 条做上下文 |
-| `$.session.cwd()` | 当前工作目录 |
-| `$.model.complete()` | 旁路模型调用，不碰主对话 |
+| `$.prompt.read()` | 读输入框草稿 |
 | `$.prompt.fill()` | 写回输入框，不发送 |
-| `$.ui.status()` | 提示词下方的状态行 |
+| `$.model.fork()` | 主模型路径：重放主线程最后一次请求 |
+| `$.model.complete()` | 主模型的兜底：会话还没有历史时用 |
+| `$.http.fetch()` | 自定义端点路径：发 HTTP 请求 |
+| `$.session.messages()` / `$.session.cwd()` | 会话上下文（自定义端点路径用） |
+| `$.store` | 设置的持久化 |
+| `$.ui.open()` / `$.ui.close()` / `$.ui.panes()` | 设置面板 |
+| `$.ui.status()` / `$.ui.toast()` / `$.ui.invalidate()` | 状态行、提示、面板重绘 |
+| `$.command.register()` | 注册 `/qi-pm` 和 `/qi-pm-config` |
+
+## 主模型路径为什么先走 fork
+
+`$.model.complete()` 按设计发的是轻量请求：没有工具定义、没有历史。**只放行 Claude Code 请求的中转站会拒绝它**（实测 HTTP 503）。
+
+`$.model.fork()` 把主线程最后一次请求原样重放：同一个模型、同一份 system prompt、同一套工具定义、同一段消息历史，只在末尾追加一条用户消息（改写指令 + 草稿）。请求特征和主对话一致，而且能命中提示词缓存。
+
+只有一个情况退回 complete：`nothing-to-fork`，即主线程还没产生过回复（全新会话或刚 `/clear`），没有前缀可重放。
+
+如果中转站连 fork 也拒绝，就用自定义端点绕开它。
 
 ## 提示词模板的硬约束
 
-system prompt 里有几条：
+system prompt（fork 路径下是那条用户消息的开头）里有几条：
 
 - 只输出 `<enhanced-prompt>` 和 `</enhanced-prompt>` 之间的内容
-- 不用工具、不提问
+- 不用工具、不提问、不解释
 - 保持原语言
 - **原样保留文件路径、符号、命令、参数、报错文本**
 - 代码块和行内代码不动
@@ -59,18 +89,23 @@ system prompt 里有几条：
 
 ## 上下文怎么取
 
-参考了 dsh 的 wukong 插件，但比它省事：wukong 要自己实现读会话，这个 mod 直接调 `$.session.messages()`。
+- 主模型路径：fork 自带完整会话历史，不需要另取
+- 自定义端点路径：参考 dsh 的 wukong 插件，取最近 10 条消息，每条压成一行、截断 1500 字符，加上当前工作目录；读不到就降级为不带上下文，而不是失败
 
-- 取最近 10 条消息，每条压成一行、截断 1500 字符
-- 加上当前工作目录
-- **读不到就降级**，不带上下文改写，而不是失败
+## 测试
+
+```bash
+npm test
+```
+
+`node --test`，覆盖三个协议的请求构造、端点拼接与响应解析。都是纯函数，不需要 Claude Code 运行。
 
 ## 已知边界
 
-- 改写模型固定用当前主模型，还不能配自定义端点
-- 没有 key 配置，因为只用主模型
-- 只在能绘制的界面里工作（终端、桌面端、VS Code 扩展）
-- `$.model.complete` 的返回值签名以本机生成的类型为准：官方文档说返回对象，GitHub 上的 d.ts 说返回 `Promise<string>`，本文件按后者写
+- 只在能绘制的界面里工作（终端、桌面端、VS Code 扩展）；手机端面板只显示摘要，不能编辑
+- 自定义端点直连，能不能用取决于服务商对三种协议的兼容程度
+- `$.model.complete` 的返回值在不同版本里形状不同（对象或字符串），代码两种都接受
+- 自定义端点的请求没有超时控制，服务端不响应时状态行会停在「改写中…」
 
 ## 类型从哪来
 
@@ -78,10 +113,13 @@ system prompt 里有几条：
 
 这是**你这台机器的版本**的真实签名。官方明说 GitHub 上那份可能更旧，两者冲突时以本机生成的为准。
 
-它已经解决了本项目的两个不确定点：
+它已经解决了本项目的几个不确定点：
 
-- `$.model.complete` 返回 `ModelCompleteResult`，一个联合类型：成功分支带 `isAnswered: true` 和 `text`，拒绝分支带 `isAnswered: false` 和 `reason`。GitHub 上的 d.ts 说 `Promise<string>`，那是旧版，第一版代码照它写就崩了。
+- `$.model.complete` 返回 `ModelCompleteResult`，一个联合类型：成功分支带 `isAnswered: true` 和 `text`，拒绝分支带 `isAnswered: false` 和 `reason`。GitHub 上的 d.ts 说 `Promise<string>`，那是旧版。
 - `$.session.model()` 返回主循环的模型，`/model` 显示的那个。
+- `$.model.fork` 的请求体是「主线程最后一次请求 + 一条用户消息」，工具全部 deny。
+- `$.http.fetch` 走宿主网络，返回 `{status, ok, headers, text}`，插件自己不碰网络。
+- `$.ui.open` 开面板，`ui.render` 用 `{component: "Pane", requestId: <id>}` 匹配到它。
 
 这些生成文件不进 git：`types/` 目录自带一个内容为 `*` 的 `.gitignore`，根 `tsconfig.json` 也已加入忽略。
 

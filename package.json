@@ -1,0 +1,15 @@
+{
+  "name": "qi-pm",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Claude Code mod: rewrite the prompt box draft with a side model, fill it back for review.",
+  "license": "MIT",
+  "author": {
+    "name": "qizhuxu",
+    "email": "qykzhu@163.com"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  }
+}
