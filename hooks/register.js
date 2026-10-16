@@ -20,12 +20,16 @@ const NL = String.fromCharCode(10)
 const BEGIN = "<enhanced-prompt>"
 const END = "</enhanced-prompt>"
 
+const DRAFT_MARK = "[Draft]"
+
 // Read as a system prompt on the complete path, and as the opening of the
 // single user message on the fork path, where there is no system slot.
 const RULES = `Rewrite the draft at the end of this message into a precise prompt for a coding agent.
 
 Rules:
+- The draft begins after the ${DRAFT_MARK} line; everything before that line is context, for your eyes only.
 - Reply with the rewritten prompt only, wrapped in ${BEGIN} and ${END}.
+- Never include the context block, the ${DRAFT_MARK} line or the markers themselves inside your reply.
 - Do not use any tools. Do not ask questions. Do not explain.
 - Keep the original language of the draft.
 - Preserve every file path, symbol, command, flag and error string exactly as written.
@@ -56,8 +60,19 @@ const PROTOCOL_LABELS = [
 ]
 
 function buildPrompt(draft, context) {
-  if (!context) return draft
-  return "[Context]" + NL + context + NL + NL + draft
+  if (!context) return DRAFT_MARK + NL + draft
+  return "[Context]" + NL + context + NL + NL + DRAFT_MARK + NL + draft
+}
+
+// The rewriter sometimes echoes the context block back — it reads the whole
+// message as the draft. The block is input, not part of the rewrite, so a
+// leading one is dropped before the text goes anywhere near the box.
+function stripContext(text, context) {
+  if (!context) return text
+  if (!text.startsWith("[Context]")) return text
+  const cut = text.indexOf(NL + NL)
+  if (cut < 0) return text
+  return text.slice(cut + 2).trim()
 }
 
 // Collapse runs of whitespace without a regex literal, so this file stays
@@ -325,7 +340,7 @@ function errorFrom(json) {
 // complete sends, which is what the HTTP 503 on the first run was.
 async function forkRewrite($, draft) {
   try {
-    return await $.model.fork({ prompt: RULES + NL + NL + draft })
+    return await $.model.fork({ prompt: RULES + NL + NL + DRAFT_MARK + NL + draft })
   } catch (err) {
     return { isAnswered: false, reason: "fork 调用失败", error: why(err) }
   }
@@ -339,8 +354,9 @@ async function completeRewrite($, draft) {
   if (!model) return { isAnswered: false, reason: "拿不到当前模型" }
 
   const context = await readContext($)
+  let result
   try {
-    return await $.model.complete({
+    result = await $.model.complete({
       model,
       system: RULES,
       prompt: buildPrompt(draft, context),
@@ -349,6 +365,11 @@ async function completeRewrite($, draft) {
   } catch (err) {
     return { isAnswered: false, reason: "complete 调用失败", error: why(err) }
   }
+  if (typeof result === "string") return stripContext(result, context)
+  if (result && result.isAnswered && typeof result.text === "string") {
+    return Object.assign({}, result, { text: stripContext(result.text, context) })
+  }
+  return result
 }
 
 // The custom-endpoint path: one plain HTTP call, the three protocols folded
@@ -387,7 +408,7 @@ async function customRewrite($, config, draft) {
   if (typeof text !== "string" || text.trim() === "") {
     return { isAnswered: false, reason: "响应里没有文本", error: errorFrom(json) }
   }
-  return { isAnswered: true, text }
+  return { isAnswered: true, text: stripContext(text, context) }
 }
 
 async function readDraft($, explicitDraft) {
@@ -765,4 +786,4 @@ export function register(on, options) {
 }
 
 // Exported for the tests alone; the engine only reads register.
-export { endpointFor, requestFor, textFrom, errorFrom, joinPath, authHeaders }
+export { endpointFor, requestFor, textFrom, errorFrom, joinPath, authHeaders, buildPrompt, stripContext, RULES }

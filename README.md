@@ -78,7 +78,8 @@ claude --plugin-dir D:/AI/BeAnything/cc-mod-qiqm
 
 system prompt（fork 路径下是那条用户消息的开头）里有几条：
 
-- 只输出 `<enhanced-prompt>` 和 `</enhanced-prompt>` 之间的内容
+- 草稿在 `[Draft]` 行之后，之前的都是上下文，只给模型看
+- 只输出 `<enhanced-prompt>` 和 `</enhanced-prompt>` 之间的内容，不带上文块和标记本身
 - 不用工具、不提问、不解释
 - 保持原语言
 - **原样保留文件路径、符号、命令、参数、报错文本**
@@ -91,6 +92,7 @@ system prompt（fork 路径下是那条用户消息的开头）里有几条：
 
 - 主模型路径：fork 自带完整会话历史，不需要另取
 - 自定义端点路径：参考 dsh 的 wukong 插件，取最近 10 条消息，每条压成一行、截断 1500 字符，加上当前工作目录；读不到就降级为不带上下文，而不是失败
+- 改写模型偶尔会把上下文块照抄进答案里，代码在回填前会把它剥掉（`stripContext`）
 
 ## 测试
 

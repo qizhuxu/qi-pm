@@ -5,7 +5,9 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 
-import { endpointFor, requestFor, textFrom, errorFrom, joinPath, authHeaders } from "../hooks/register.js"
+import { endpointFor, requestFor, textFrom, errorFrom, joinPath, authHeaders, buildPrompt, stripContext } from "../hooks/register.js"
+
+const NL = String.fromCharCode(10)
 
 const CONFIG = {
   protocol: "anthropic",
@@ -117,4 +119,21 @@ test("authHeaders carries each protocol's credential", () => {
   const chat = authHeaders("openai-chat", "sk-b")
   assert.equal(chat.authorization, "Bearer sk-b")
   assert.equal(chat["x-api-key"], undefined)
+})
+
+test("buildPrompt marks the draft and keeps context above it", () => {
+  assert.equal(buildPrompt("the draft", ""), "[Draft]" + NL + "the draft")
+  assert.equal(
+    buildPrompt("the draft", "项目目录：D:/x"),
+    "[Context]" + NL + "项目目录：D:/x" + NL + NL + "[Draft]" + NL + "the draft",
+  )
+})
+
+test("stripContext drops an echoed context block and nothing else", () => {
+  const context = "项目目录：D:/x"
+  const echoed = "[Context]" + NL + context + NL + NL + "rewritten"
+  assert.equal(stripContext(echoed, context), "rewritten")
+  assert.equal(stripContext("rewritten", context), "rewritten")
+  assert.equal(stripContext(echoed, ""), echoed)
+  assert.equal(stripContext("[Context]", context), "[Context]")
 })
