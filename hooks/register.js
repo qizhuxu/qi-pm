@@ -88,12 +88,24 @@ function textOf(result) {
   return ""
 }
 
-// A record with isAnswered false carries why the model declined.
+// A record with isAnswered false carries why the model declined. An
+// api-error adds a status and a classified error kind, and both are worth
+// showing: a rate limit, an overload and a bad key read differently.
 function refusalOf(result) {
   if (!result || typeof result !== "object") return undefined
   if (result.isAnswered !== false) return undefined
-  if (typeof result.reason === "string" && result.reason !== "") return result.reason
-  return "模型没有给出改写"
+
+  const bits = []
+  bits.push(typeof result.reason === "string" && result.reason !== ""
+    ? result.reason
+    : "模型没有给出改写")
+  if (typeof result.error === "string" && result.error !== "") bits.push(result.error)
+  if (typeof result.status === "number") {
+    bits.push("HTTP " + result.status)
+  } else if (result.reason === "api-error") {
+    bits.push("没有收到响应")
+  }
+  return bits.join(" · ")
 }
 
 function extract(text) {
