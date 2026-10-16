@@ -1,9 +1,10 @@
 // qi-pm — rewrite the draft in the prompt box with a side-channel model call,
 // then put the result back for the person to edit or send.
 //
-// Three API calls carry the whole interaction:
+// Four API calls carry the whole interaction:
 //   $.prompt.read()       read the draft
-//   $.model.complete()    a model call outside the main conversation
+//   $.model.fork()        the model call, replaying the main thread's request
+//   $.model.complete()    the fallback, for a session with no history yet
 //   $.prompt.fill()       write back into the box, without sending
 //
 // The main conversation never sees the rewrite unless the person presses
@@ -15,15 +16,19 @@ const NL = String.fromCharCode(10)
 const BEGIN = "<enhanced-prompt>"
 const END = "</enhanced-prompt>"
 
-const SYSTEM = `You rewrite a rough draft into a precise prompt for a coding agent.
+// Read as a system prompt on the complete path, and as the opening of the
+// single user message on the fork path, where there is no system slot.
+const RULES = `Rewrite the draft at the end of this message into a precise prompt for a coding agent.
 
 Rules:
 - Reply with the rewritten prompt only, wrapped in ${BEGIN} and ${END}.
-- Do not use any tools. Do not ask questions.
+- Do not use any tools. Do not ask questions. Do not explain.
 - Keep the original language of the draft.
 - Preserve every file path, symbol, command, flag and error string exactly as written.
 - Keep code blocks and inline code unchanged.
 - Do not invent requirements the draft does not imply.`
+
+const MAX_TOKENS = 2048
 
 function buildPrompt(draft, context) {
   if (!context) return draft
@@ -155,6 +160,39 @@ function why(err) {
   return String(err)
 }
 
+// $.model.fork replays the main thread's last request — its model, system
+// prompt, tools and messages — with our instruction after it, so the request
+// looks exactly like the main conversation's. A relay that serves only
+// Claude Code traffic passes this one and turns away the light request
+// complete sends, which is what the HTTP 503 on the first run was.
+async function forkRewrite($, draft) {
+  try {
+    return await $.model.fork({ prompt: RULES + NL + NL + draft })
+  } catch (err) {
+    return { isAnswered: false, reason: "fork 调用失败", error: why(err) }
+  }
+}
+
+// The fallback for a session whose main thread has not answered yet: fork
+// has no prefix to replay then, so complete carries the request instead. It
+// has no transcript of its own, so it reads one and sends it along.
+async function completeRewrite($, draft) {
+  const model = await resolveModel($)
+  if (!model) return { isAnswered: false, reason: "拿不到当前模型" }
+
+  const context = await readContext($)
+  try {
+    return await $.model.complete({
+      model,
+      system: RULES,
+      prompt: buildPrompt(draft, context),
+      maxTokens: MAX_TOKENS,
+    })
+  } catch (err) {
+    return { isAnswered: false, reason: "complete 调用失败", error: why(err) }
+  }
+}
+
 // `explicitDraft` comes from /qi-pm <text>; without it the box is the source.
 async function rewrite($, explicitDraft) {
   let draft = typeof explicitDraft === "string" ? explicitDraft.trim() : ""
@@ -168,31 +206,22 @@ async function rewrite($, explicitDraft) {
     return
   }
 
-  const model = await resolveModel($)
-  if (!model) {
-    status($, "拿不到当前模型，无法改写")
-    return
-  }
-
-  const context = await readContext($)
   status($, "改写中…")
 
-  let raw
-  try {
-    raw = await $.model.complete({
-      model,
-      system: SYSTEM,
-      prompt: buildPrompt(draft, context),
-      maxTokens: 2048,
-    })
-  } catch (err) {
-    status($, "模型调用失败 — " + why(err))
-    return
+  let via = "fork"
+  let raw = await forkRewrite($, draft)
+
+  // Only an absent prefix falls back. Every other failure would fail the
+  // same way through complete, and a relay that rejects light requests
+  // rejects that path outright.
+  if (!raw.isAnswered && raw.reason === "nothing-to-fork") {
+    via = "complete"
+    raw = await completeRewrite($, draft)
   }
 
   const refusal = refusalOf(raw)
   if (refusal) {
-    status($, "改写被拒绝 — " + refusal + "（模型 " + model + "）")
+    status($, "改写被拒绝 — " + via + " · " + refusal)
     return
   }
 
@@ -216,7 +245,7 @@ async function rewrite($, explicitDraft) {
     return
   }
 
-  const how = context ? "（已带上会话上下文）" : "（没有读到会话上下文）"
+  const how = via === "fork" ? "（带完整会话上下文）" : "（只带最近对话）"
   status($, "改写完成" + how + "，改完按 Enter 发送")
 }
 
