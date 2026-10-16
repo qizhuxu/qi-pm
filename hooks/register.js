@@ -192,7 +192,7 @@ async function rewrite($, explicitDraft) {
 
   const refusal = refusalOf(raw)
   if (refusal) {
-    status($, "改写被拒绝 — " + refusal)
+    status($, "改写被拒绝 — " + refusal + "（模型 " + model + "）")
     return
   }
 
