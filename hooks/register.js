@@ -75,7 +75,29 @@ function buildContext(cwd, messages) {
   return parts.join(NL)
 }
 
+// $.model.complete resolves to the reply's text on some builds and to a
+// record carrying it on others: the docs describe the record, the published
+// d.ts promises a string. Accept both rather than guess, which is what the
+// first run got wrong.
+function textOf(result) {
+  if (typeof result === "string") return result
+  if (result && typeof result === "object") {
+    if (typeof result.text === "string") return result.text
+    if (typeof result.content === "string") return result.content
+  }
+  return ""
+}
+
+// A record with isAnswered false carries why the model declined.
+function refusalOf(result) {
+  if (!result || typeof result !== "object") return undefined
+  if (result.isAnswered !== false) return undefined
+  if (typeof result.reason === "string" && result.reason !== "") return result.reason
+  return "模型没有给出改写"
+}
+
 function extract(text) {
+  if (typeof text !== "string") return undefined
   const start = text.indexOf(BEGIN)
   if (start < 0) return undefined
   const from = start + BEGIN.length
@@ -85,6 +107,8 @@ function extract(text) {
   return out === "" ? undefined : out
 }
 
+// A command's output already carries the plugin's name in the transcript, so
+// these messages do not repeat it.
 function status($, text) {
   try {
     $.ui.status(text)
@@ -114,6 +138,11 @@ async function resolveModel($) {
   return undefined
 }
 
+function why(err) {
+  if (err && typeof err.message === "string" && err.message !== "") return err.message
+  return String(err)
+}
+
 // `explicitDraft` comes from /qi-pm <text>; without it the box is the source.
 async function rewrite($, explicitDraft) {
   let draft = typeof explicitDraft === "string" ? explicitDraft.trim() : ""
@@ -123,18 +152,18 @@ async function rewrite($, explicitDraft) {
     draft = box && typeof box.text === "string" ? box.text.trim() : ""
   }
   if (!draft) {
-    status($, "qi-pm: 输入框是空的，也没有给参数")
+    status($, "输入框是空的，也没有给参数")
     return
   }
 
   const model = await resolveModel($)
   if (!model) {
-    status($, "qi-pm: 拿不到当前模型，无法改写")
+    status($, "拿不到当前模型，无法改写")
     return
   }
 
   const context = await readContext($)
-  status($, "qi-pm: 改写中…")
+  status($, "改写中…")
 
   let raw
   try {
@@ -145,14 +174,20 @@ async function rewrite($, explicitDraft) {
       maxTokens: 2048,
     })
   } catch (err) {
-    const why = err && err.message ? err.message : String(err)
-    status($, "qi-pm: 模型调用失败 — " + why)
+    status($, "模型调用失败 — " + why(err))
     return
   }
 
-  const out = extract(raw)
+  const refusal = refusalOf(raw)
+  if (refusal) {
+    status($, "改写被拒绝 — " + refusal)
+    return
+  }
+
+  const out = extract(textOf(raw))
   if (!out) {
-    status($, "qi-pm: 输出里没有 " + BEGIN + " 标记")
+    const shape = typeof raw === "string" ? "字符串" : (raw === null ? "null" : typeof raw)
+    status($, "输出里没有 " + BEGIN + " 标记（返回类型 " + shape + "）")
     return
   }
 
@@ -160,18 +195,17 @@ async function rewrite($, explicitDraft) {
   try {
     filled = await $.prompt.fill({ text: out, mode: "replace" })
   } catch (err) {
-    const why = err && err.message ? err.message : String(err)
-    status($, "qi-pm: 写回输入框失败 — " + why)
+    status($, "写回输入框失败 — " + why(err))
     return
   }
 
   if (filled && filled.isFilled === false) {
-    status($, "qi-pm: 输入框没有接受这次写入")
+    status($, "输入框没有接受这次写入")
     return
   }
 
   const how = context ? "（已带上会话上下文）" : "（没有读到会话上下文）"
-  status($, "qi-pm: 改写完成" + how + "，改完按 Enter 发送")
+  status($, "改写完成" + how + "，改完按 Enter 发送")
 }
 
 const COMMAND_NAME = "qi-pm"
@@ -188,8 +222,7 @@ export function register(on, options) {
         argumentHint: "[草稿]",
       })
     } catch (err) {
-      const why = err && err.message ? err.message : String(err)
-      status($, "qi-pm: 注册命令失败 — " + why)
+      status($, "注册命令失败 — " + why(err))
     }
     return next(e)
   })
@@ -199,13 +232,11 @@ export function register(on, options) {
     await rewrite($, e.args)
     return {}
   }).catch(async ($, e, next) => {
-    // command.run gates the command, so it carries a catch handler:
-    // a throw here would otherwise leave the command without an answer.
+    // command.run gates the command, so it carries a catch handler: a throw
+    // here would otherwise leave the command without an answer.
     const failure = next.error
-    const why = failure && failure.message
-      ? failure.message
-      : (failure ? failure.kind : "unknown")
-    status($, "qi-pm: 命令失败 — " + why)
+    const detail = failure && failure.message ? failure.message : (failure ? failure.kind : "unknown")
+    status($, "命令失败 — " + detail)
     return {}
   })
 
