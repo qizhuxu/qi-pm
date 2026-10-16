@@ -37,6 +37,7 @@ const MAX_TOKENS = 2048
 const COMMAND_NAME = "qi-pm"
 const CONFIG_COMMAND = "qi-pm-config"
 const CONFIG_KEY = "config"
+const MODELS_KEY = "models"
 const PANE_ID = "qi-pm-config"
 
 const PROTOCOLS = ["main", "anthropic", "openai-chat", "openai-responses"]
@@ -221,26 +222,35 @@ async function saveConfig($, patch) {
 
 // ------------------------------------------------------------- the requests
 
-// Join the base with the protocol's path: a base that already names the full
-// path is kept as it is, a base ending in /v1 gets the tail alone, so both
-// https://host and https://host/v1 land on the same URL.
-function endpointFor(protocol, baseUrl) {
+// Join the base with a path: a base that already names the full path is kept
+// as it is, a base ending in /v1 gets the tail alone, so both https://host
+// and https://host/v1 land on the same URL.
+function joinPath(baseUrl, path) {
   let base = baseUrl.trim()
   while (base.endsWith("/")) base = base.slice(0, -1)
-  const path = PROTOCOL_PATHS[protocol]
-  if (!path) return base
+  if (path === "") return base
   if (base.endsWith(path)) return base
   const tail = path.slice(3)
   if (base.endsWith("/v1")) return base + tail
   return base + path
 }
 
+function endpointFor(protocol, baseUrl) {
+  return joinPath(baseUrl, PROTOCOL_PATHS[protocol] || "")
+}
+
+// The auth each protocol wants on every call, the models list included.
+function authHeaders(protocol, apiKey) {
+  if (protocol === "anthropic") {
+    return { "content-type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" }
+  }
+  return { "content-type": "application/json", authorization: "Bearer " + apiKey }
+}
+
 function requestFor(protocol, config, rules, prompt) {
-  const headers = { "content-type": "application/json" }
+  const headers = authHeaders(protocol, config.apiKey)
   let body
   if (protocol === "anthropic") {
-    headers["x-api-key"] = config.apiKey
-    headers["anthropic-version"] = "2023-06-01"
     body = {
       model: config.model,
       max_tokens: MAX_TOKENS,
@@ -248,7 +258,6 @@ function requestFor(protocol, config, rules, prompt) {
       messages: [{ role: "user", content: prompt }],
     }
   } else if (protocol === "openai-responses") {
-    headers.authorization = "Bearer " + config.apiKey
     body = {
       model: config.model,
       instructions: rules,
@@ -256,7 +265,6 @@ function requestFor(protocol, config, rules, prompt) {
       max_output_tokens: MAX_TOKENS,
     }
   } else {
-    headers.authorization = "Bearer " + config.apiKey
     body = {
       model: config.model,
       max_tokens: MAX_TOKENS,
@@ -466,6 +474,78 @@ function keyHint(config) {
   return config.apiKey !== "" ? "已设置，输入新值覆盖" : "未设置"
 }
 
+async function loadModels($) {
+  try {
+    const raw = await $.store.get(MODELS_KEY)
+    if (Array.isArray(raw)) {
+      const ids = []
+      for (const item of raw) {
+        if (typeof item === "string" && item !== "") ids.push(item)
+      }
+      return ids
+    }
+  } catch (err) {
+    // fall through
+  }
+  return []
+}
+
+// Reads the endpoint's own model list so nobody has to guess an id from
+// memory: gpt-6 and "GPT 6" are not the same string to a service.
+async function fetchModels($) {
+  const config = await loadConfig($)
+  if (config.protocol === "main") {
+    status($, "先在协议里选一个自定义接口，再拉模型列表")
+    return
+  }
+  if (config.baseUrl === "") {
+    status($, "先填端点，再拉模型列表")
+    return
+  }
+
+  let response
+  try {
+    response = await $.http.fetch(joinPath(config.baseUrl, "/v1/models"), {
+      method: "GET",
+      headers: authHeaders(config.protocol, config.apiKey),
+    })
+  } catch (err) {
+    status($, "拉取模型列表失败 — " + why(err))
+    return
+  }
+
+  let json
+  try {
+    json = JSON.parse(response.text)
+  } catch (err) {
+    json = undefined
+  }
+  if (!response.ok) {
+    const detail = errorFrom(json) || response.text.slice(0, 200)
+    status($, "拉取模型列表失败 — HTTP " + response.status + " · " + detail)
+    return
+  }
+
+  const data = json && Array.isArray(json.data) ? json.data : []
+  const ids = []
+  for (const item of data) {
+    if (item && typeof item.id === "string" && item.id !== "") ids.push(item.id)
+  }
+  if (ids.length === 0) {
+    status($, "模型列表是空的")
+    return
+  }
+
+  try {
+    await $.store.set(MODELS_KEY, ids)
+  } catch (err) {
+    status($, "模型列表没能保存 — " + why(err))
+    return
+  }
+  $.ui.toast("qi-pm：拉到 " + ids.length + " 个模型，在面板里选")
+  $.ui.invalidate("ui.render")
+}
+
 async function togglePane($) {
   try {
     const panes = await $.ui.panes()
@@ -504,6 +584,25 @@ function protocolSelect(ui, $, config) {
   })
 }
 
+// Shown instead of the free-text field once a list was fetched; the stored
+// model stays first if the endpoint no longer lists it.
+function modelSelect(ui, $, config, choices) {
+  const options = []
+  for (const id of choices) options.push({ value: id, label: id })
+  if (config.model !== "" && choices.indexOf(config.model) < 0) {
+    options.unshift({ value: config.model, label: config.model + "（当前，不在列表里）" })
+  }
+  return ui.Select({
+    key: "model",
+    label: "模型",
+    options,
+    value: config.model,
+    onSelect: (value) => {
+      void saveConfig($, { model: value })
+    },
+  })
+}
+
 // The key field never draws the stored key: it starts empty and a blank
 // submit is ignored, so Enter on an untouched field cannot blank the key.
 function settingInput(ui, $, config, key, label, placeholder, isSecret) {
@@ -522,6 +621,15 @@ function settingInput(ui, $, config, key, label, placeholder, isSecret) {
 
 function buttonRow(ui, $, config) {
   const buttons = [
+    ui.Button({
+      key: "fetch-models",
+      label: "拉取模型",
+      plain: true,
+      dimColor: true,
+      onPress: () => {
+        void fetchModels($)
+      },
+    }),
     ui.Button({
       key: "close",
       label: "关闭",
@@ -558,13 +666,18 @@ async function paneBody($, e) {
     })
   }
 
+  const choices = await loadModels($)
+  const modelRow = choices.length > 0
+    ? modelSelect(ui, $, config, choices)
+    : settingInput(ui, $, config, "model", "模型", "gpt-6 或 claude-sonnet-4-5 之类，或点「拉取模型」", false)
+
   const rows = [
     ui.Text({ bold: true, children: "qi-pm 改写设置" }),
     ui.Text({ dimColor: true, children: summaryLine(config) }),
     protocolSelect(ui, $, config),
     settingInput(ui, $, config, "baseUrl", "端点", "https://api.example.com（可带 /v1，留空回退主模型）", false),
     settingInput(ui, $, config, "apiKey", "密钥", keyHint(config), true),
-    settingInput(ui, $, config, "model", "模型", "claude-sonnet-4-5 或 gpt-4o 之类", false),
+    modelRow,
     buttonRow(ui, $, config),
   ]
   return ui.Box({ flexDirection: "column", gap: 1, children: rows })
@@ -652,4 +765,4 @@ export function register(on, options) {
 }
 
 // Exported for the tests alone; the engine only reads register.
-export { endpointFor, requestFor, textFrom, errorFrom }
+export { endpointFor, requestFor, textFrom, errorFrom, joinPath, authHeaders }

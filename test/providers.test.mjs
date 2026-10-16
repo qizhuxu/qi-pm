@@ -5,7 +5,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 
-import { endpointFor, requestFor, textFrom, errorFrom } from "../hooks/register.js"
+import { endpointFor, requestFor, textFrom, errorFrom, joinPath, authHeaders } from "../hooks/register.js"
 
 const CONFIG = {
   protocol: "anthropic",
@@ -102,4 +102,19 @@ test("errorFrom reads the message out of each shape", () => {
   assert.equal(errorFrom({ message: "top level" }), "top level")
   assert.equal(errorFrom({}), undefined)
   assert.equal(errorFrom(undefined), undefined)
+})
+
+test("joinPath keeps the models path right on either base shape", () => {
+  assert.equal(joinPath("http://127.0.0.1:8000", "/v1/models"), "http://127.0.0.1:8000/v1/models")
+  assert.equal(joinPath("http://127.0.0.1:8000/v1", "/v1/models"), "http://127.0.0.1:8000/v1/models")
+  assert.equal(joinPath("http://127.0.0.1:8000/v1/models/", "/v1/models"), "http://127.0.0.1:8000/v1/models")
+})
+
+test("authHeaders carries each protocol's credential", () => {
+  const anthropic = authHeaders("anthropic", "sk-a")
+  assert.equal(anthropic["x-api-key"], "sk-a")
+  assert.equal(anthropic["anthropic-version"], "2023-06-01")
+  const chat = authHeaders("openai-chat", "sk-b")
+  assert.equal(chat.authorization, "Bearer sk-b")
+  assert.equal(chat["x-api-key"], undefined)
 })
