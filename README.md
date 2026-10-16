@@ -72,6 +72,19 @@ system prompt 里有几条：
 - 只在能绘制的界面里工作（终端、桌面端、VS Code 扩展）
 - `$.model.complete` 的返回值签名以本机生成的类型为准：官方文档说返回对象，GitHub 上的 d.ts 说返回 `Promise<string>`，本文件按后者写
 
+## 类型从哪来
+
+首次用 `--plugin-dir` 加载时，Claude Code 会把权威类型写到 `.claude-plugin/types/claude-code/index.d.ts`。
+
+这是**你这台机器的版本**的真实签名。官方明说 GitHub 上那份可能更旧，两者冲突时以本机生成的为准。
+
+它已经解决了本项目的两个不确定点：
+
+- `$.model.complete` 返回 `ModelCompleteResult`，一个联合类型：成功分支带 `isAnswered: true` 和 `text`，拒绝分支带 `isAnswered: false` 和 `reason`。GitHub 上的 d.ts 说 `Promise<string>`，那是旧版，第一版代码照它写就崩了。
+- `$.session.model()` 返回主循环的模型，`/model` 显示的那个。
+
+这些生成文件不进 git：`types/` 目录自带一个内容为 `*` 的 `.gitignore`，根 `tsconfig.json` 也已加入忽略。
+
 ## 许可
 
 MIT
