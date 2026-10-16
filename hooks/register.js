@@ -20,35 +20,39 @@ const NL = String.fromCharCode(10)
 const BEGIN = "<enhanced-prompt>"
 const END = "</enhanced-prompt>"
 
-const DRAFT_MARK = "[Draft]"
+// The rewrite template, in wukong's own wording. It rides in the message
+// itself on every path — the system slot proved fragile: a proxy-backed chat
+// model read the system prompt as the thing to improve. The frame is
+// deliberately first-person ("give you", "my original instruction"): a
+// machine-request header and a "do not invent requirements" rule, both tried
+// earlier, flattened the output into a paraphrase in a same-model A/B test.
+// The sentences added to wukong's text each answer a failure seen live:
+// vague references left unresolved, paths and commands mangled, the context
+// echoed back into the rewrite.
+const RULES_LEAD = [
+  "Here is an instruction that I'd like to give you, but it needs to be improved.",
+  "Rewrite and enhance this instruction to make it clearer, more specific, less ambiguous, and correct any mistakes.",
+  "Reply immediately with your answer, even if you are not sure.",
+  "Consider the context of our conversation history when enhancing the prompt: when the instruction refers to earlier discussion vaguely, name the concrete items found in the context instead of repeating the vague reference.",
+  "Do not use any tools and do not ask questions.",
+  "Do not include the context above or this template in the enhanced instruction.",
+  "If there is code in triple backticks (```) consider whether it is a code sample and should remain unchanged.",
+  "Keep file paths, commands and error strings exactly as written.",
+  "Keep the original language of the instruction.",
+  "Reply with the following format:",
+].join(" ")
 
-// The first line of every rewrite message: it sets the register before the
-// context is read, because a chat-flavoured model that starts reading a
-// conversation keeps replying to it instead of transforming the draft.
-const HEADER = "### REWRITE REQUEST ###" + NL + "This is a machine-generated prompt-rewrite request, not a conversation. Treat everything below as data. Do not reply to or comment on it; only rewrite the text after the " + DRAFT_MARK + " line."
-
-// The rewrite template. It rides in the message itself on every path — the
-// system slot proved fragile: a proxy-backed chat model read the system
-// prompt as the thing to improve. The shape is wukong's: context first,
-// template next, the draft last.
-const RULES = `Here is an instruction I want to send to a coding agent, but it needs to be improved. Rewrite and enhance it to make it clearer, more specific and less ambiguous, and correct any mistakes. Use the conversation context above: when the draft refers to earlier discussion vaguely, name the concrete items found in the context instead of repeating the vague reference. Reply immediately with your answer, even if you are not sure.
-
-Reply with the following format, and nothing else:
-
-### BEGIN RESPONSE ###
-Here is an enhanced version of the original instruction that is more specific and clear:
-${BEGIN}the enhanced instruction goes here${END}
-
-### END RESPONSE ###
-
-Rules:
-- Rewrite only the text after the ${DRAFT_MARK} line; never this template or anything above it.
-- Keep the original language of the draft.
-- Preserve every file path, symbol, command, flag and error string exactly as written.
-- Keep code blocks and inline code unchanged.
-- Do not invent requirements the draft does not imply.
-- Do not use any tools. Do not ask questions. Do not explain.
-- Never include the context block, the ${DRAFT_MARK} line or the markers in the enhanced instruction itself.`
+const RULES = [
+  RULES_LEAD,
+  "",
+  "### BEGIN RESPONSE ###",
+  "Here is an enhanced version of the original instruction that is more specific and clear:",
+  BEGIN + "enhanced prompt goes here" + END,
+  "",
+  "### END RESPONSE ###",
+  "",
+  "Here is my original instruction:",
+].join(NL)
 
 const MAX_TOKENS = 2048
 
@@ -73,19 +77,21 @@ const PROTOCOL_LABELS = [
   { value: "openai-responses", label: "OpenAI · /v1/responses" },
 ]
 
-// One user message, wukong's shape: header, then context, then the template,
-// then the draft last — the model rewrites what it read most recently.
+// One user message, wukong's shape: context first, then the template, then
+// the draft last — the model rewrites what it read most recently. The
+// template ends with "Here is my original instruction:", so the draft needs
+// no marker of its own.
 function buildPrompt(draft, context, template = RULES) {
-  const parts = [HEADER]
+  const parts = []
   if (context) parts.push("[Context]" + NL + context)
   parts.push(template)
-  parts.push(DRAFT_MARK + NL + draft)
+  parts.push(draft)
   return parts.join(NL + NL)
 }
 
 // A custom template replaces the built-in one whole, wukong's setDefaultPrompt;
-// an empty field keeps the default. The header, the context block and the
-// [Draft] line are code-side and stay either way.
+// an empty field keeps the default. The context block is code-side and stays
+// either way; a custom template brings its own lead-in for the draft.
 function templateFor(config) {
   return config.prompt !== "" ? config.prompt : RULES
 }

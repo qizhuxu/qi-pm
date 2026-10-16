@@ -118,17 +118,18 @@ test("authHeaders carries each protocol's credential", () => {
   assert.equal(chat["x-api-key"], undefined)
 })
 
-test("buildPrompt orders header, context, template and draft", () => {
+test("buildPrompt orders context, template and draft", () => {
   const bare = buildPrompt("the draft", "")
-  assert.ok(bare.startsWith("### REWRITE REQUEST ###"))
+  assert.ok(bare.startsWith("Here is an instruction that I'd like to give you"))
   assert.ok(bare.includes("### BEGIN RESPONSE ###"))
-  assert.ok(bare.endsWith("[Draft]" + NL + "the draft"))
+  assert.ok(bare.endsWith("Here is my original instruction:" + NL + NL + "the draft"))
   assert.ok(!bare.includes("[Context]"))
+  assert.ok(!bare.includes("[Draft]"))
 
   const withContext = buildPrompt("the draft", "项目目录：D:/x")
   const ctxAt = withContext.indexOf("[Context]" + NL + "项目目录：D:/x")
   const rulesAt = withContext.indexOf("### BEGIN RESPONSE ###")
-  const draftAt = withContext.indexOf("[Draft]" + NL + "the draft")
+  const draftAt = withContext.indexOf("Here is my original instruction:" + NL + NL + "the draft")
   assert.ok(ctxAt >= 0)
   assert.ok(rulesAt > ctxAt)
   assert.ok(draftAt > rulesAt)
@@ -141,10 +142,9 @@ test("templateFor falls back to the built-in template", () => {
 
 test("buildPrompt uses a custom template whole", () => {
   const message = buildPrompt("the draft", "", "MY TEMPLATE")
-  assert.ok(message.startsWith("### REWRITE REQUEST ###"))
-  assert.ok(message.includes("MY TEMPLATE"))
+  assert.ok(message.startsWith("MY TEMPLATE"))
   assert.ok(!message.includes("### BEGIN RESPONSE ###"))
-  assert.ok(message.endsWith("[Draft]" + NL + "the draft"))
+  assert.ok(message.endsWith("MY TEMPLATE" + NL + NL + "the draft"))
 })
 
 test("stripContext drops an echoed context block and nothing else", () => {
