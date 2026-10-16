@@ -1,0 +1,17 @@
+{
+  "name": "qi-pm",
+  "owner": {
+    "name": "qizhuxu",
+    "email": "qykzhu@163.com"
+  },
+  "description": "qi-pm: a Claude Code mod that rewrites the prompt-box draft with a side model call.",
+  "plugins": [
+    {
+      "name": "qi-pm",
+      "source": "./",
+      "description": "Rewrite the draft in the prompt box with a side-channel model call, then put the result back for you to edit or send.",
+      "category": "productivity",
+      "keywords": ["prompt", "rewrite", "enhance", "mod", "composer"]
+    }
+  ]
+}

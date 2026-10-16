@@ -36,11 +36,14 @@ settings hook 只能往上下文里注入旁白，用户看不见，也改不了
 
 ## 安装
 
-从 marketplace：
+从 marketplace（两步）：
 
 ```
-/plugin install qi-pm --marketplace <owner>/<repo>
+/plugin marketplace add qizhuxu/qi-pm
+/plugin install qi-pm@qi-pm
 ```
+
+装完就常驻了：之后每次启动 Claude Code 都会自动加载，不再需要 `--plugin-dir`。
 
 开发时加载本地目录（支持热重载）：
 
